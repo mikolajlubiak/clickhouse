@@ -1,21 +1,26 @@
+
 import csv
 from clickhouse_driver import Client
 
-# Step 1: Load CSV data into ClickHouse
+# Step 1: Connect to ClickHouse and create the database if not exists
 client = Client(host='localhost', port=9000)
 client.execute('CREATE DATABASE IF NOT EXISTS prefixspan')
 client.execute('USE prefixspan')
 
+# Step 2: Load CSV data into ClickHouse and preprocess
 with open('data.csv', 'r') as f:
     data = list(csv.reader(f))
 
-columns = ['CLIENT', 'INDEX', 'PRODUCT']
-query = 'INSERT INTO prefixspan.data ({}) VALUES'.format(', '.join(columns))
-query += ' VALUES {}'.format(', '.join(['(%s, %s, %s)'] * len(data)))
+# Step 2.1: Create the 'data' table
+client.execute('DROP TABLE IF EXISTS prefixspan.data')
+client.execute('CREATE TABLE prefixspan.data (CLIENT Int32, INDEX Int32, PRODUCT String) ENGINE = Memory')
 
-client.execute(query, data)
+# Step 2.2: Insert data into the 'data' table
+insert_query = 'INSERT INTO prefixspan.data (CLIENT, INDEX, PRODUCT) VALUES'
+insert_query += ' VALUES {}'.format(', '.join(['(%s, %s, %s)'] * len(data)))
+client.execute(insert_query, data)
 
-# Step 2: Preprocess the data using ClickHouse SQL
+# Step 2.3: Preprocess the data and create 'preprocessed_data' table
 preprocess_query = '''
     CREATE TABLE IF NOT EXISTS prefixspan.preprocessed_data AS
     SELECT
