@@ -1,50 +1,62 @@
-
-import pandas as pd
+import csv
 from clickhouse_driver import Client
 
-# Read the CSV data
-df = pd.read_csv('data.csv')
+# Step 1: Load CSV data into ClickHouse
+client = Client(host='localhost', port=9000)
+client.execute('CREATE DATABASE IF NOT EXISTS prefixspan')
+client.execute('USE prefixspan')
 
-# Group the data by 'CLIENT' and join the 'PRODUCT' values into a list
-df_grouped = df.groupby('CLIENT')['PRODUCT'].apply(list).reset_index(name='ALL_PRODUCTS')
+with open('data.csv', 'r') as f:
+    data = list(csv.reader(f))
 
-# Connect to Clickhouse
-client = Client('localhost')
+columns = ['CLIENT', 'INDEX', 'PRODUCT']
+query = 'INSERT INTO prefixspan.data ({}) VALUES'.format(', '.join(columns))
+query += ' VALUES {}'.format(', '.join(['(%s, %s, %s)'] * len(data)))
 
-# Create a table in Clickhouse
-client.execute('CREATE TABLE IF NOT EXISTS products (ID Int32, ALL_PRODUCTS Array(String)) ENGINE = Memory')
+client.execute(query, data)
 
-# Insert the data into the table
-for index, row in df_grouped.iterrows():
-    client.execute('INSERT INTO products VALUES', [(row['CLIENT'], row['ALL_PRODUCTS'])])
+# Step 2: Preprocess the data using ClickHouse SQL
+preprocess_query = '''
+    CREATE TABLE IF NOT EXISTS prefixspan.preprocessed_data AS
+    SELECT
+        CLIENT,
+        groupArray(PRODUCT) AS ALL_PRODUCTS
+    FROM prefixspan.data
+    GROUP BY CLIENT
+'''
 
-# Fetch the data from the table
-data = client.execute('SELECT ALL_PRODUCTS FROM products')
+client.execute(preprocess_query)
 
-# Convert the data into a list of lists
-sequences = [list(row[0]) for row in data]
+# Step 3: Implement PrefixSpan using ClickHouse SQL
+prefixspan_query = '''
+    WITH RECURSIVE
+        prefixes AS (
+            SELECT
+                arrayJoin(ALL_PRODUCTS) AS prefix,
+                arraySlice(ALL_PRODUCTS, arrayPosition(ALL_PRODUCTS, prefix) + 1) AS suffix
+            FROM prefixspan.preprocessed_data
+        ),
+        frequent_prefixes AS (
+            SELECT
+                prefix,
+                count() AS freq
+            FROM prefixes
+            GROUP BY prefix
+            HAVING freq >= 2
+        )
+    SELECT
+        prefix,
+        suffix,
+        freq
+    FROM prefixes
+    JOIN frequent_prefixes USING prefix
+'''
 
-# PrefixSpan implementation
-def prefix_span(pattern, S):
-    count = sum(1 for seq in S if is_subsequence(pattern, seq))
-    if count >= min_support:
-        frequent_patterns.append((pattern, count))
-    for item in set(x for sublist in S for x in sublist):
-        pattern_ = pattern + [item]
-        S_ = [s[s.index(item)+1:] for s in S if is_subsequence(pattern_, s)]
-        prefix_span(pattern_, S_)
+# Step 4: Query the PrefixSpan results using the clickhouse-driver
+results = client.execute(prefixspan_query)
 
-def is_subsequence(pattern, sequence):
-    if not pattern:
-        return True
-    if not sequence:
-        return False
-    if pattern[0] == sequence[0]:
-        return is_subsequence(pattern[1:], sequence[1:])
-    return is_subsequence(pattern, sequence[1:])
-
-# Set the minimum support and find the frequent patterns
-min_support = 2
-frequent_patterns = []
-prefix_span([], sequences)
-print(frequent_patterns)
+for row in results:
+    prefix = row[0]
+    suffix = row[1]
+    freq = row[2]
+    print(f"Prefix: {prefix}, Suffix: {suffix}, Frequency: {freq}")
